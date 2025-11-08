@@ -1,93 +1,63 @@
-# p4-atm
+# ATM Design and Implementation
 
+This is a two-part project, the first of which is a *team* effort,
+while the second is an *individual* effort. Because the second part
+of the project will make use of the results of the first part, only
+submissions that reach a certain threshold of functionality by the
+nominal deadline will be targets for the second part.  The second
+part is due at the end of the semester, so extensions cannot be
+granted.
 
+In this project you will first design and implement a prototype
+ATM/Bank system. Then you will get a chance to (try to) attack other
+teams' designs! We have tried to make these instructions as explicit
+as possible. Read them carefully; *if anything is unclear, please ask
+for clarification well in advance.*
 
-## Getting started
+## Overview
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+ 1. You may work in teams of at most five people. Sign up for your
+    teams on ELMS under "People">"Groups".
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+ 2. You will design and implement three programs: an *ATM*, a *bank*,
+    and an *init* program that initializes state for them. (You may
+    also find it useful to create various auxiliary files defining
+    classes and functionalities that can be used by the ATM and Bank
+    classes.)
 
-## Add your files
+ 3. You will be provided with stub code for the ATM, the bank, and a
+    *router* that will route messages between the ATM and the bank. The
+    stub code will allow the ATM and the router to communicate with each
+    other, and the router and the bank to communicate with each other.
+    The router will be configured to simply pass messages back-and-forth
+    between the ATM and the bank. (Looking ahead, the router will provide
+    a way to carry out passive or active attacks on the "communication
+    channel" between the bank and the ATM.)
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+ 4. You will design a protocol allowing a user to withdraw money from
+    the ATM.  Requirements include:
+    
+     * The ATM *card* of user `XXX` will be represented by a file
+       called `XXX.card`.
+     * The user's PIN must be a 4-digit number.
+     * User balances will be maintained by the bank, not by the ATM.
+     * You need **not** support multiple ATMs connecting to the bank
+       simultaneously.
+     * You also do **not** need to maintain state between restarting
+       the bank (e.g., all user balances can be maintained in memory).
+    
+    Of course, as part of the design process you will want to consider
+    security...
 
-```
-cd existing_repo
-git remote add origin https://gitlab.cs.umd.edu/cmsc414-dave/fall25/project/p4-atm.git
-git branch -M main
-git push -uf origin main
-```
+ 5. You will then implement your protocol. Most of your work should
+    involve the ATM, bank, and init programs, with no (or absolutely
+    minimal) modifications to the router.
 
-## Integrate with your tools
+ 6. As with previous projects, the reference platform is the VM we have
+    provided.
 
-- [ ] [Set up project integrations](https://gitlab.cs.umd.edu/cmsc414-dave/fall25/project/p4-atm/-/settings/integrations)
+Part 1, the team phase of the project, is described in
+[build-it.md](build-it.md).
 
-## Collaborate with your team
-
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Part 2, the solo phase of the project, is described in
+[break-it.md](break-it.md).
