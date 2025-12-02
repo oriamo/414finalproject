@@ -7,6 +7,7 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
+#include <sys/time.h> 
 
 static int verify_mac(unsigned char *key, unsigned char *msg, int len, unsigned char *mac) {
     unsigned char computed_mac[32];
@@ -56,6 +57,11 @@ ATM* atm_create(char *init_filename)
     // Set up the network state
     atm->sockfd=socket(AF_INET,SOCK_DGRAM,0);
 
+    printf("ATM Port: %d\n", ATM_PORT);
+
+    int opt = 1;
+    setsockopt(atm->sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+
     bzero(&atm->rtr_addr,sizeof(atm->rtr_addr));
     atm->rtr_addr.sin_family = AF_INET;
     atm->rtr_addr.sin_addr.s_addr=inet_addr("127.0.0.1");
@@ -65,7 +71,11 @@ ATM* atm_create(char *init_filename)
     atm->atm_addr.sin_family = AF_INET;
     atm->atm_addr.sin_addr.s_addr=inet_addr("127.0.0.1");
     atm->atm_addr.sin_port = htons(ATM_PORT);
-    bind(atm->sockfd,(struct sockaddr *)&atm->atm_addr,sizeof(atm->atm_addr));
+    printf("ATM Port: %d\n", ATM_PORT);
+    if (bind(atm->sockfd,(struct sockaddr *)&atm->atm_addr,sizeof(atm->atm_addr)) < 0) {
+        perror("ATM bind failed");
+        exit(1);
+    }
 
     // Set timeout
     struct timeval tv;

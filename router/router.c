@@ -15,12 +15,18 @@ Router* router_create()
 
     router->sockfd = socket(AF_INET,SOCK_DGRAM,0);
 
+    int opt = 1;
+    setsockopt(router->sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+
     // Initialize router's address
     bzero(&router->rtr_addr,sizeof(router->rtr_addr));
     router->rtr_addr.sin_family = AF_INET;
     router->rtr_addr.sin_addr.s_addr=htonl(INADDR_ANY);
     router->rtr_addr.sin_port=htons(ROUTER_PORT);
-    bind(router->sockfd,(struct sockaddr *)&router->rtr_addr,sizeof(router->rtr_addr));
+    if (bind(router->sockfd,(struct sockaddr *)&router->rtr_addr,sizeof(router->rtr_addr)) < 0) {
+        perror("Router bind failed");
+        exit(1);
+    }
 
     // Initialize Bank's address
     bzero(&router->bank_addr,sizeof(router->bank_addr));

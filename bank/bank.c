@@ -26,6 +26,9 @@ Bank* bank_create(char *init_filename)
     // Set up the network state
     bank->sockfd=socket(AF_INET,SOCK_DGRAM,0);
 
+    int opt = 1;
+    setsockopt(bank->sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+
     bzero(&bank->rtr_addr,sizeof(bank->rtr_addr));
     bank->rtr_addr.sin_family = AF_INET;
     bank->rtr_addr.sin_addr.s_addr=inet_addr("127.0.0.1");
@@ -35,7 +38,10 @@ Bank* bank_create(char *init_filename)
     bank->bank_addr.sin_family = AF_INET;
     bank->bank_addr.sin_addr.s_addr=inet_addr("127.0.0.1");
     bank->bank_addr.sin_port = htons(BANK_PORT);
-    bind(bank->sockfd,(struct sockaddr *)&bank->bank_addr,sizeof(bank->bank_addr));
+    if (bind(bank->sockfd,(struct sockaddr *)&bank->bank_addr,sizeof(bank->bank_addr)) < 0) {
+        perror("Bank bind failed");
+        exit(1);
+    }
 
     // Read initialization file
     FILE *f = fopen(init_filename, "rb");
@@ -48,6 +54,8 @@ Bank* bank_create(char *init_filename)
         exit(64);
     }
     fclose(f);
+    
+    
 
     // Initialize HashTables
     bank->users = hash_table_create(100);
