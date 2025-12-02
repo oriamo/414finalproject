@@ -19,7 +19,13 @@ int main(int argc, char**argv)
    char sendline[1000];
    char recvline[1000];
 
-   Bank *bank = bank_create();
+   if(argc != 2)
+   {
+       printf("Usage: bank <init-filename>\n");
+       return 64;
+   }
+
+   Bank *bank = bank_create(argv[1]);
 
    printf("%s", prompt);
    fflush(stdout);
@@ -34,7 +40,7 @@ int main(int argc, char**argv)
 
        if(FD_ISSET(0, &fds))
        {
-           fgets(sendline, 10000,stdin);
+           fgets(sendline, 1000,stdin);
            bank_process_local_command(bank, sendline, strlen(sendline));
            printf("%s", prompt);
            fflush(stdout);

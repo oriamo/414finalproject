@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include "hash_table.h"
 
 typedef struct _Bank
 {
@@ -28,10 +29,14 @@ typedef struct _Bank
     struct sockaddr_in bank_addr;
 
     // Protocol state
-    // TODO add more, as needed
+    unsigned char K_enc[32];
+    unsigned char K_mac[32];
+    HashTable *users;
+    HashTable *active_sessions;
+    HashTable *recent_messages;
 } Bank;
 
-Bank* bank_create();
+Bank* bank_create(char *init_filename);
 void bank_free(Bank *bank);
 ssize_t bank_send(Bank *bank, char *data, size_t data_len);
 ssize_t bank_recv(Bank *bank, char *data, size_t max_data_len);

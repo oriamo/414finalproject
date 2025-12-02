@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <time.h>
 
 typedef struct _ATM
 {
@@ -25,10 +26,15 @@ typedef struct _ATM
     struct sockaddr_in atm_addr;
 
     // Protocol state
-    // TODO add more, as needed
+    unsigned char K_enc[32];
+    unsigned char K_mac[32];
+    
+    char current_user[251];
+    int session_active;
+    time_t last_activity_time;
 } ATM;
 
-ATM* atm_create();
+ATM* atm_create(char *init_filename);
 void atm_free(ATM *atm);
 ssize_t atm_send(ATM *atm, char *data, size_t data_len);
 ssize_t atm_recv(ATM *atm, char *data, size_t max_data_len);
