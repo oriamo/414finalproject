@@ -3,17 +3,32 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
+#include <limits.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
+#include <openssl/kdf.h>
 #include <sys/time.h> 
+
+// Secure key derivation using PBKDF2
+static int derive_key_from_pin(const char *pin, const unsigned char *salt, size_t salt_len, unsigned char *key) {
+    return PKCS5_PBKDF2_HMAC(pin, strlen(pin), salt, salt_len, 10000, EVP_sha256(), 32, key) == 1 ? 0 : -1;
+}
+
+// Constant-time comparison to prevent timing attacks
+static int secure_compare(const unsigned char *a, const unsigned char *b, size_t len) {
+    return CRYPTO_memcmp(a, b, len) == 0;
+}
 
 static int verify_mac(unsigned char *key, unsigned char *msg, int len, unsigned char *mac) {
     unsigned char computed_mac[32];
     unsigned int mac_len;
-    HMAC(EVP_sha256(), key, 32, msg, len, computed_mac, &mac_len);
-    return CRYPTO_memcmp(mac, computed_mac, 32) == 0;
+    if (!HMAC(EVP_sha256(), key, 32, msg, len, computed_mac, &mac_len)) {
+        return 0;
+    }
+    return secure_compare(mac, computed_mac, 32);
 }
 
 static int decrypt_msg(unsigned char *key, unsigned char *iv, unsigned char *ciphertext, int len, unsigned char *plaintext) {
@@ -37,10 +52,21 @@ static int decrypt_msg(unsigned char *key, unsigned char *iv, unsigned char *cip
 
 static int encrypt_msg(unsigned char *key, unsigned char *iv, unsigned char *plaintext, int len, unsigned char *ciphertext) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return -1;
+    
     int outlen1, outlen2;
-    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
-    EVP_EncryptUpdate(ctx, ciphertext, &outlen1, plaintext, len);
-    EVP_EncryptFinal_ex(ctx, ciphertext + outlen1, &outlen2);
+    if (!EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv)) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    if (!EVP_EncryptUpdate(ctx, ciphertext, &outlen1, plaintext, len)) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    if (!EVP_EncryptFinal_ex(ctx, ciphertext + outlen1, &outlen2)) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
     EVP_CIPHER_CTX_free(ctx);
     return outlen1 + outlen2;
 }
@@ -136,15 +162,16 @@ void atm_process_command(ATM *atm, char *command)
         if (current_time - atm->last_activity_time > 60) {
             printf("Session timed out due to inactivity\n");
             
-            // Send END_SESSION
+            // Send END_SESSION with correct format including Session ID
             unsigned char plaintext[2048];
             uint64_t ts = current_time;
             memcpy(plaintext, &ts, 8);
             plaintext[8] = 0x04; // END_SESSION
+            memcpy(plaintext + 9, &atm->session_id, 8); // Include Session ID
             int user_len = strlen(atm->current_user);
-            plaintext[9] = user_len;
-            memcpy(plaintext + 10, atm->current_user, user_len);
-            int plain_len = 10 + user_len;
+            plaintext[17] = user_len;
+            memcpy(plaintext + 18, atm->current_user, user_len);
+            int plain_len = 18 + user_len;
 
             unsigned char iv[16];
             RAND_bytes(iv, 16);
@@ -163,16 +190,17 @@ void atm_process_command(ATM *atm, char *command)
 
             atm->session_active = 0;
             memset(atm->current_user, 0, sizeof(atm->current_user));
+            atm->session_id = 0;
             
             // Reject current command
-            // But wait, if I just timed out, I should probably not process the command.
             // The prompt will change back to "ATM: " in main loop.
             return;
         }
     }
 
     char cmd_copy[1000];
-    strncpy(cmd_copy, command, 1000);
+    strncpy(cmd_copy, command, sizeof(cmd_copy) - 1);
+    cmd_copy[sizeof(cmd_copy) - 1] = '\0';  // Ensure null termination
     char *token = strtok(cmd_copy, " ");
     if (!token) return;
 
@@ -188,8 +216,9 @@ void atm_process_command(ATM *atm, char *command)
             return;
         }
 
-        // Validate username
-        if (strlen(user_arg) > 250) {
+        // Validate username FIRST before any operations
+        size_t user_len = strlen(user_arg);
+        if (user_len == 0 || user_len > 250) {
              printf("Usage: begin-session <user-name>\n");
              return;
         }
@@ -200,11 +229,14 @@ void atm_process_command(ATM *atm, char *command)
             }
         }
 
-        // Check card file
+        // Check card file - use snprintf for safety
         char card_filename[300];
-        sprintf(card_filename, "%s.card", user_arg);
+        if (snprintf(card_filename, sizeof(card_filename), "%s.card", user_arg) >= sizeof(card_filename)) {
+            printf("Usage: begin-session <user-name>\n");
+            return;
+        }
         if (access(card_filename, F_OK) != 0) {
-            printf("Unable to access %s's card\n", user_arg);
+            printf("No such user\n");  // Generic error to prevent user enumeration
             return;
         }
 
@@ -226,42 +258,59 @@ void atm_process_command(ATM *atm, char *command)
 
         // Decrypt Card
         FILE *cf = fopen(card_filename, "rb");
+        if (!cf) {
+            printf("Not authorized\n");
+            return;
+        }
+        
         unsigned char card_iv[16];
         unsigned char card_ciphertext[64];
-        fread(card_iv, 1, 16, cf);
+        unsigned char salt[16];
+        
+        // Read salt, IV, and ciphertext with proper error checking
+        if (fread(salt, 1, 16, cf) != 16 || 
+            fread(card_iv, 1, 16, cf) != 16) {
+            fclose(cf);
+            printf("Not authorized\n");
+            return;
+        }
+        
         int card_c_len = fread(card_ciphertext, 1, 64, cf);
         fclose(cf);
+        
+        if (card_c_len <= 0) {
+            printf("Not authorized\n");
+            return;
+        }
 
+        // Use secure key derivation instead of single SHA256
         unsigned char pin_key[32];
-        SHA256((unsigned char*)pin, 4, pin_key);
+        if (derive_key_from_pin(pin, salt, 16, pin_key) != 0) {
+            printf("Not authorized\n");
+            return;
+        }
 
         unsigned char user_key[32];
-        // We expect 32 bytes of user key.
-        // Decrypt
         unsigned char decrypted_card[64];
         int d_len = decrypt_msg(pin_key, card_iv, card_ciphertext, card_c_len, decrypted_card);
         
-        // If decryption fails or length is wrong, it's wrong PIN (likely)
-        // But AES-CBC doesn't guarantee integrity. We just get garbage.
-        // We send garbage to bank.
+        // Proper validation of decrypted data
         if (d_len != 32) {
-            // It might be padding issues if key is wrong.
-            // We can just proceed with whatever we got or fail here.
-            // Spec says "If the PIN entered is invalid... or if it is unable to authenticate... print Not authorized".
-            // We'll send to bank to confirm.
-            // If d_len is not 32, we can pad or truncate, or just fail.
-            // But better to let bank reject it to avoid timing leaks?
-            // Actually, if d_len is wrong, we know it's wrong PIN locally if we assume card file is valid.
-            // But let's just use what we have.
+            printf("Not authorized\n");
+            return;
         }
+        
         memcpy(user_key, decrypted_card, 32);
+        // Clear sensitive data
+        memset(pin_key, 0, sizeof(pin_key));
+        memset(decrypted_card, 0, sizeof(decrypted_card));
 
         // Send to Bank
         unsigned char plaintext[2048];
         uint64_t ts = time(NULL);
         memcpy(plaintext, &ts, 8);
         plaintext[8] = 0x01; // BEGIN_SESSION
-        int user_len = strlen(user_arg);
+        // int user_len = strlen(user_arg); // Removed redeclaration
         plaintext[9] = user_len;
         memcpy(plaintext + 10, user_arg, user_len);
         memcpy(plaintext + 10 + user_len, user_key, 32);
@@ -309,8 +358,19 @@ void atm_process_command(ATM *atm, char *command)
         if (r_plain[8] == 0) {
             printf("Authorized\n");
             atm->session_active = 1;
-            strcpy(atm->current_user, user_arg);
+            // Use safe string copy with bounds checking
+            strncpy(atm->current_user, user_arg, sizeof(atm->current_user) - 1);
+            atm->current_user[sizeof(atm->current_user) - 1] = '\0';
             atm->last_activity_time = time(NULL);
+            
+            // Get Session ID
+            if (r_p_len >= 19) { // 11 + 8
+                memcpy(&atm->session_id, r_plain + 11, 8);
+            } else {
+                // Protocol error?
+                atm->session_active = 0;
+                printf("Not authorized\n");
+            }
         } else {
             printf("Not authorized\n");
         }
@@ -327,12 +387,21 @@ void atm_process_command(ATM *atm, char *command)
             return;
         }
 
+        // Enhanced validation to prevent integer overflow attacks
         char *endptr;
+        errno = 0;
         long val = strtol(amt_arg, &endptr, 10);
-        if (*endptr != '\0' || val < 0 || val > 2147483647) {
+        if (*endptr != '\0' || errno != 0 || val < 0 || val > INT_MAX) {
              printf("Usage: withdraw <amt>\n");
              return;
         }
+        
+        // Additional check for reasonable withdrawal limits
+        if (val == 0) {
+            printf("Usage: withdraw <amt>\n");
+            return;
+        }
+        
         int amt = (int)val;
 
         // Send WITHDRAW
@@ -340,11 +409,12 @@ void atm_process_command(ATM *atm, char *command)
         uint64_t ts = time(NULL);
         memcpy(plaintext, &ts, 8);
         plaintext[8] = 0x02; // WITHDRAW
+        memcpy(plaintext + 9, &atm->session_id, 8);
         int user_len = strlen(atm->current_user);
-        plaintext[9] = user_len;
-        memcpy(plaintext + 10, atm->current_user, user_len);
-        memcpy(plaintext + 10 + user_len, &amt, 4);
-        int plain_len = 10 + user_len + 4;
+        plaintext[17] = user_len;
+        memcpy(plaintext + 18, atm->current_user, user_len);
+        memcpy(plaintext + 18 + user_len, &amt, 4);
+        int plain_len = 18 + user_len + 4;
 
         unsigned char iv[16];
         RAND_bytes(iv, 16);
@@ -407,10 +477,11 @@ void atm_process_command(ATM *atm, char *command)
         uint64_t ts = time(NULL);
         memcpy(plaintext, &ts, 8);
         plaintext[8] = 0x03; // BALANCE
+        memcpy(plaintext + 9, &atm->session_id, 8);
         int user_len = strlen(atm->current_user);
-        plaintext[9] = user_len;
-        memcpy(plaintext + 10, atm->current_user, user_len);
-        int plain_len = 10 + user_len;
+        plaintext[17] = user_len;
+        memcpy(plaintext + 18, atm->current_user, user_len);
+        int plain_len = 18 + user_len;
 
         unsigned char iv[16];
         RAND_bytes(iv, 16);
@@ -470,10 +541,11 @@ void atm_process_command(ATM *atm, char *command)
         uint64_t ts = time(NULL);
         memcpy(plaintext, &ts, 8);
         plaintext[8] = 0x04; // END_SESSION
+        memcpy(plaintext + 9, &atm->session_id, 8);
         int user_len = strlen(atm->current_user);
-        plaintext[9] = user_len;
-        memcpy(plaintext + 10, atm->current_user, user_len);
-        int plain_len = 10 + user_len;
+        plaintext[17] = user_len;
+        memcpy(plaintext + 18, atm->current_user, user_len);
+        int plain_len = 18 + user_len;
 
         unsigned char iv[16];
         RAND_bytes(iv, 16);

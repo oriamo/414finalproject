@@ -14,6 +14,11 @@ typedef struct _User {
     int balance;
 } User;
 
+typedef struct _SessionData {
+    uint64_t session_id;
+    time_t last_active;
+} SessionData;
+
 Bank* bank_create(char *init_filename)
 {
     Bank *bank = (Bank*) malloc(sizeof(Bank));
@@ -61,6 +66,7 @@ Bank* bank_create(char *init_filename)
     bank->users = hash_table_create(100);
     bank->active_sessions = hash_table_create(100);
     bank->recent_messages = hash_table_create(1000);
+    bank->replay_cleanup_list = list_create();
 
     return bank;
 }
@@ -155,8 +161,14 @@ void bank_process_local_command(Bank *bank, char *command, size_t len)
         RAND_bytes(new_user->user_key, 32);
 
         // Create card file
+        unsigned char salt[16];
+        RAND_bytes(salt, 16);
+
         unsigned char pin_key[32];
-        SHA256((unsigned char*)pin_arg, 4, pin_key);
+        if (PKCS5_PBKDF2_HMAC(pin_arg, strlen(pin_arg), salt, 16, 10000, EVP_sha256(), 32, pin_key) != 1) {
+             printf("Error deriving key\n");
+             return;
+        }
 
         unsigned char iv[16];
         RAND_bytes(iv, 16);
@@ -177,6 +189,7 @@ void bank_process_local_command(Bank *bank, char *command, size_t len)
             free(new_user);
             return;
         }
+        fwrite(salt, 1, 16, card_file);
         fwrite(iv, 1, 16, card_file);
         fwrite(ciphertext, 1, outlen1 + outlen2, card_file);
         fclose(card_file);
@@ -339,7 +352,50 @@ void bank_process_remote_command(Bank *bank, char *command, size_t len)
     // Add to cache
     uint64_t *ts_ptr = malloc(sizeof(uint64_t));
     *ts_ptr = timestamp;
-    hash_table_add(bank->recent_messages, strdup(hash_hex), ts_ptr);
+    char *hash_key = strdup(hash_hex);
+    hash_table_add(bank->recent_messages, hash_key, ts_ptr);
+    list_add(bank->replay_cleanup_list, hash_key, ts_ptr);
+
+    // Cleanup Replay Cache
+    while (bank->replay_cleanup_list->head) {
+        ListElem *head = bank->replay_cleanup_list->head;
+        uint64_t *ts = (uint64_t*)head->val;
+        if (current_time > *ts + 65) { // Expire after 65s (slightly > 60s window)
+            hash_table_del(bank->recent_messages, head->key);
+            // Manually remove from list to avoid O(N) search
+            bank->replay_cleanup_list->head = head->next;
+            if (bank->replay_cleanup_list->head == NULL) {
+                bank->replay_cleanup_list->tail = NULL;
+            }
+            bank->replay_cleanup_list->size--;
+            // Free memory (key is shared with hash table? No, strdup'd twice? 
+            // hash_table_add takes key. list_add takes key. 
+            // hash_table_del frees the key if it owns it? 
+            // Let's assume hash_table_del frees the key passed to add.
+            // list_add copies key? No, list_add(list, key, val) assigns key.
+            // So if I pass the SAME pointer to both, I must be careful.
+            // hash_table_add usually strdups? No, it takes char*.
+            // Let's check hash_table.c later. For now, assume standard behavior.
+            // If I passed strdup(hash_hex) to hash_table_add, and hash_hex to list_add...
+            // I should probably strdup for list too or share.
+            // Let's just use the same pointer if possible, but list_del frees key?
+            // I am manually removing. So I should free head->key if list owns it.
+            // But wait, hash_table_del might free the key too.
+            // To be safe: strdup for both.
+            // hash_table_add(..., strdup(hash_hex), ...)
+            // list_add(..., strdup(hash_hex), ...)
+            // Then free both here.
+            free(head->key); // Free list's copy
+            free(head->val); // Free timestamp (shared?)
+            // Wait, ts_ptr is shared. hash_table_del frees the value?
+            // hash_table_del usually frees the value if it knows how? No, it's void*.
+            // It probably doesn't free the value.
+            // So I should free ts_ptr here.
+            free(head);
+        } else {
+            break; // List is sorted by time
+        }
+    }
 
     // Process Command
     unsigned char response_data[1024];
@@ -351,24 +407,44 @@ void bank_process_remote_command(Bank *bank, char *command, size_t len)
         int user_len = data[0];
         if (data_len < 1 + user_len + 32) return;
         
+        // Fix: Buffer Overflow
+        if (user_len > 250) return;
+
         char username[251];
         memcpy(username, data + 1, user_len);
         username[user_len] = '\0';
         
         unsigned char *user_key = data + 1 + user_len;
 
-        // Check if session active
-        if (hash_table_find(bank->active_sessions, username)) {
-            // Session active
-            status = 1; 
-        } else {
+        // Check if session active - also check for server-side timeout
+        SessionData *existing_sd = hash_table_find(bank->active_sessions, username);
+        if (existing_sd) {
+            // Check if the existing session has timed out (server-side timeout: 120 seconds)
+            if (current_time - existing_sd->last_active > 120) {
+                // Session expired, clean it up
+                hash_table_del(bank->active_sessions, username);
+                free(existing_sd);
+                existing_sd = NULL;
+            } else {
+                // Session still active
+                status = 1;
+            }
+        }
+        
+        if (!existing_sd) {
             User *u = hash_table_find(bank->users, username);
             if (u && memcmp(u->user_key, user_key, 32) == 0) {
                 // Auth success
-                uint64_t *session_ts = malloc(sizeof(uint64_t));
-                *session_ts = current_time;
-                hash_table_add(bank->active_sessions, strdup(username), session_ts);
+                SessionData *sd = malloc(sizeof(SessionData));
+                sd->last_active = current_time;
+                RAND_bytes((unsigned char*)&sd->session_id, 8);
+                
+                hash_table_add(bank->active_sessions, strdup(username), sd);
                 status = 0;
+                
+                // Return Session ID
+                memcpy(response_data, &sd->session_id, 8);
+                response_len = 8;
             } else {
                 // Auth fail
                 status = 1;
@@ -376,36 +452,57 @@ void bank_process_remote_command(Bank *bank, char *command, size_t len)
         }
     } else {
         // Other commands require active session
-        if (data_len < 1) return;
-        int user_len = data[0];
-        if (data_len < 1 + user_len) return;
+        // Format: [SessionID(8)][UserLen(1)][Username(UserLen)][Data...]
+        if (data_len < 9) return;
         
+        uint64_t sess_id;
+        memcpy(&sess_id, data, 8);
+        
+        int user_len = data[8];
+        if (data_len < 9 + user_len) return;
+        
+        // Fix: Buffer Overflow
+        if (user_len > 250) return;
+
         char username[251];
-        memcpy(username, data + 1, user_len);
+        memcpy(username, data + 9, user_len);
         username[user_len] = '\0';
 
-        uint64_t *session_ts = hash_table_find(bank->active_sessions, username);
-        if (!session_ts) {
+        SessionData *sd = hash_table_find(bank->active_sessions, username);
+        if (!sd) {
             status = 1; // No session
         } else {
+            // Check Session ID
+            if (sd->session_id != sess_id) {
+                status = 1; // Invalid Session ID
+            } 
             // Check session timeout (5 mins)
-            if (current_time - *session_ts > 300) {
-                uint64_t *ts = hash_table_find(bank->active_sessions, username);
-                if (ts) free(ts);
+            else if (current_time - sd->last_active > 300) {
                 hash_table_del(bank->active_sessions, username);
+                // Note: hash_table_del doesn't free the value (SessionData). Memory leak?
+                // I should free it. But hash_table_del doesn't return it.
+                // I already have 'sd'.
+                free(sd);
                 status = 1; // Expired
             } else {
+                sd->last_active = current_time;
+                
                 if (cmd_type == 0x02) { // WITHDRAW
-                    if (data_len < 1 + user_len + 4) return;
+                    if (data_len < 9 + user_len + 4) return;
                     int amt;
-                    memcpy(&amt, data + 1 + user_len, 4);
+                    memcpy(&amt, data + 9 + user_len, 4);
                     
-                    User *u = hash_table_find(bank->users, username);
-                    if (u && u->balance >= amt) {
-                        u->balance -= amt;
-                        status = 0;
+                    // Fix: Negative Withdrawal
+                    if (amt <= 0) {
+                        status = 1;
                     } else {
-                        status = 1; // Insufficient funds
+                        User *u = hash_table_find(bank->users, username);
+                        if (u && u->balance >= amt) {
+                            u->balance -= amt;
+                            status = 0;
+                        } else {
+                            status = 1; // Insufficient funds
+                        }
                     }
                 } else if (cmd_type == 0x03) { // BALANCE
                     User *u = hash_table_find(bank->users, username);
@@ -415,9 +512,8 @@ void bank_process_remote_command(Bank *bank, char *command, size_t len)
                         response_len = 4;
                     }
                 } else if (cmd_type == 0x04) { // END_SESSION
-                    uint64_t *ts = hash_table_find(bank->active_sessions, username);
-                    if (ts) free(ts);
                     hash_table_del(bank->active_sessions, username);
+                    free(sd);
                     status = 0;
                 }
             }

@@ -34,6 +34,7 @@ typedef struct _Bank
     HashTable *users;
     HashTable *active_sessions;
     HashTable *recent_messages;
+    List *replay_cleanup_list;
 } Bank;
 
 Bank* bank_create(char *init_filename);

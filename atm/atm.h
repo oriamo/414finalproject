@@ -31,6 +31,7 @@ typedef struct _ATM
     
     char current_user[251];
     int session_active;
+    uint64_t session_id;
     time_t last_activity_time;
 } ATM;
 
