@@ -153,4 +153,4 @@ def test_create_user(init_path):
     cleanup()
        
 test_init(proj_path)
-#test_create_user(proj_path)
+test_create_user(proj_path)
