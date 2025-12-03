@@ -66,18 +66,28 @@ int main(int argc, char**argv)
        if(incoming_port == ATM_PORT)
        {
            debug_log("PKT #%lu: ATM -> BANK (%d bytes)\n", pkt_count, n);
-           print_hex("Raw packet", (unsigned char*)mesg, n);
-           router_sendto_bank(router, mesg, n);
-           debug_log("PKT #%lu: Forwarded to BANK\n", pkt_count);
+           print_hex("Raw packet from ATM", (unsigned char*)mesg, n);
+           
+           ssize_t sent = router_sendto_bank(router, mesg, n);
+           debug_log("PKT #%lu: Forwarded to BANK - sendto() returned %zd\n", pkt_count, sent);
+           
+           if (sent != n) {
+               debug_log("WARNING: Sent %zd bytes but expected to send %d bytes!\n", sent, n);
+           }
        }
 
        // Packet from the bank: forward it to the ATM
        else if(incoming_port == BANK_PORT)
        {
            debug_log("PKT #%lu: BANK -> ATM (%d bytes)\n", pkt_count, n);
-           print_hex("Raw packet", (unsigned char*)mesg, n);
-           router_sendto_atm(router, mesg, n);
-           debug_log("PKT #%lu: Forwarded to ATM\n", pkt_count);
+           print_hex("Raw packet from BANK", (unsigned char*)mesg, n);
+           
+           ssize_t sent = router_sendto_atm(router, mesg, n);
+           debug_log("PKT #%lu: Forwarded to ATM - sendto() returned %zd\n", pkt_count, sent);
+           
+           if (sent != n) {
+               debug_log("WARNING: Sent %zd bytes but expected to send %d bytes!\n", sent, n);
+           }
        }
 
        else

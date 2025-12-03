@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <sys/select.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
@@ -582,6 +583,37 @@ void atm_process_command(ATM *atm, char *command)
 
         // Wait for response
         debug_log("Waiting for bank response...\n");
+        
+        // Clear any stale packets from socket buffer first
+        char dummy_buf[1000];
+        struct timeval short_timeout;
+        short_timeout.tv_sec = 0;
+        short_timeout.tv_usec = 10000; // 10ms
+        
+        fd_set readfds;
+        int cleared_packets = 0;
+        while (1) {
+            FD_ZERO(&readfds);
+            FD_SET(atm->sockfd, &readfds);
+            int ready = select(atm->sockfd + 1, &readfds, NULL, NULL, &short_timeout);
+            if (ready > 0) {
+                ssize_t old_bytes = recvfrom(atm->sockfd, dummy_buf, 1000, 0, NULL, NULL);
+                if (old_bytes > 0) {
+                    cleared_packets++;
+                    debug_log("Cleared stale packet #%d (%zd bytes) from socket buffer\n", cleared_packets, old_bytes);
+                } else {
+                    break;
+                }
+            } else {
+                break; // No more packets
+            }
+            if (cleared_packets > 10) break; // Safety limit
+        }
+        
+        if (cleared_packets > 0) {
+            debug_log("Cleared %d stale packets from socket buffer\n", cleared_packets);
+        }
+        
         char resp_buf[4096];
         int n = atm_recv(atm, resp_buf, 4096);
         if (n < 0) {
@@ -592,9 +624,27 @@ void atm_process_command(ATM *atm, char *command)
 
         // Verify Response
         debug_log("Verifying response...\n");
+        debug_log("Expected response size: 80 bytes (16 IV + 32 ciphertext + 32 MAC)\n");
+        debug_log("Actually received: %d bytes\n", n);
+        
         if (n < 48) {
             debug_log("REJECTED: Response too short (%d < 48)\n", n);
             printf("Not authorized\n");
+            return;
+        }
+        
+        // Check if we got a truncated response
+        if (n == 64) {
+            debug_log("WARNING: Received 64-byte response instead of expected 80 bytes!\n");
+            debug_log("This suggests either:\n");
+            debug_log("  1. Router truncated the packet\n");  
+            debug_log("  2. ATM received an old/cached response\n");
+            debug_log("  3. Bank sent wrong response size\n");
+            debug_log("ATTEMPTING WORKAROUND: Will retry login in 1 second...\n");
+            
+            // Give a short delay and suggest retry
+            sleep(1);
+            printf("Communication error with bank. Please try login again.\n");
             return;
         }
         
@@ -603,6 +653,11 @@ void atm_process_command(ATM *atm, char *command)
         unsigned char *r_mac = (unsigned char*)resp_buf + n - 32;
         int r_c_len = n - 48;
         debug_log("Response structure: IV(16) + Ciphertext(%d) + MAC(32) = %d bytes\n", r_c_len, n);
+        
+        // Add detailed packet analysis
+        print_hex("Response IV", r_iv, 16);
+        print_hex("Response Ciphertext", r_c, r_c_len);
+        print_hex("Response MAC", r_mac, 32);
 
         if (!verify_mac(atm->K_mac, (unsigned char*)resp_buf, n - 32, r_mac)) {
             debug_log("REJECTED: Response MAC invalid!\n");
@@ -631,12 +686,26 @@ void atm_process_command(ATM *atm, char *command)
             atm->last_activity_time = time(NULL);
             
             // Get Session ID
+            debug_log("Checking for session ID in response...\n");
+            debug_log("Response plaintext length: %d bytes (need 19 for session ID)\n", r_p_len);
+            
             if (r_p_len >= 19) { // 11 + 8
                 memcpy(&atm->session_id, r_plain + 11, 8);
                 debug_log("Session established! session_id=0x%016lx\n", (unsigned long)atm->session_id);
             } else {
-                debug_log("ERROR: Response too short for session_id\n");
-                // Protocol error?
+                debug_log("ERROR: Response plaintext too short for session_id!\n");
+                debug_log("Expected: 19 bytes (8 timestamp + 1 status + 2 length + 8 session_id)\n");
+                debug_log("Received: %d bytes\n", r_p_len);
+                debug_log("This indicates the bank response was truncated or malformed\n");
+                
+                // Check what we actually got in the response
+                if (r_p_len >= 11) {
+                    uint16_t resp_data_len;
+                    memcpy(&resp_data_len, r_plain + 9, 2);
+                    debug_log("Response claims to have %d bytes of data (expected 8)\n", resp_data_len);
+                }
+                
+                // Protocol error - session establishment failed
                 atm->session_active = 0;
                 printf("Not authorized\n");
             }
